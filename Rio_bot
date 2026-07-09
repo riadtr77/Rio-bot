@@ -1,0 +1,575 @@
+cat > bot.js << 'EOF'
+const { Telegraf, Markup } = require('telegraf');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
+const qrcode = require('qrcode-terminal');
+
+const token = '8996066555:AAF47Ilma8K6cC0W999gIOm9g0_fMLIWmh4';
+const CHANNEL_URL = 'https://t.me/MDYEASINARFATKAIYUM1';
+const CHANNEL_USERNAME = '@MDYEASINARFATKAIYUM1';
+const OWNER_ID = 6799331831;
+
+const bot = new Telegraf(token);
+const admins = new Map();
+const users = new Map();
+const userCooldowns = new Map();
+
+async function startWhatsApp() {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_telegram');
+    const client = makeWASocket({
+        auth: state,
+        browser: ['TelegramBot', 'Chrome', '1.0.0']
+    });
+
+    client.ev.on('creds.update', saveCreds);
+    client.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        if (qr) {
+            qrcode.generate(qr, { small: true });
+            console.log('🔄 امسح QR كود من واتساب جوالك');
+        }
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) startWhatsApp();
+        }
+        if (connection === 'open') {
+            console.log('✅ واتساب جاهز للفحص!');
+        }
+    });
+
+    return client;
+}
+
+let waClient = null;
+
+(async () => {
+    waClient = await startWhatsApp();
+    console.log('✅ بوت التيليجرام جاهز! أرسل الأرقام للفحص');
+})();
+
+async function checkSubscription(userId) {
+    try {
+        const member = await bot.telegram.getChatMember(CHANNEL_USERNAME, userId);
+        return member.status === 'member' || member.status === 'administrator' || member.status === 'creator';
+    } catch (error) {
+        return false;
+    }
+}
+
+function isOwner(userId) {
+    return userId === OWNER_ID;
+}
+
+function isAdmin(userId) {
+    return admins.has(userId) || isOwner(userId);
+}
+
+function getAdminRole(userId) {
+    if (isOwner(userId)) return '👑 المالك الرئيسي';
+    if (admins.has(userId)) return admins.get(userId).role || '🛡️ أدمن';
+    return null;
+}
+
+async function registerUser(ctx) {
+    const userId = ctx.from.id;
+    const user = ctx.from;
+    
+    if (!users.has(userId)) {
+        users.set(userId, {
+            id: userId,
+            username: user.username || 'بدون يوزر',
+            firstName: user.first_name || 'بدون اسم',
+            joinedAt: new Date().toISOString(),
+            lastActive: new Date().toISOString()
+        });
+        console.log(`✅ مستخدم جديد: ${user.first_name} (${userId})`);
+    } else {
+        users.set(userId, {
+            ...users.get(userId),
+            lastActive: new Date().toISOString()
+        });
+    }
+}
+
+async function showMainMenu(ctx) {
+    await registerUser(ctx);
+    const userId = ctx.from.id;
+    
+    let keyboard = [
+        [
+            Markup.button.callback('📱 فحص أرقام', 'check_numbers'),
+            Markup.button.url('📢 قناتنا', CHANNEL_URL)
+        ],
+        [
+            Markup.button.callback('👤 معلومات حسابي', 'my_info')
+        ]
+    ];
+
+    if (isAdmin(userId)) {
+        keyboard.push([Markup.button.callback('⚙️ لوحة التحكم', 'admin_panel')]);
+    }
+
+    await ctx.replyWithHTML(
+        '🌟 <b>مرحباً بك في بوت فحص أرقام واتساب!</b> 🌟\n\n' +
+        '━━━━━━━━━━━━━━━━━━━\n' +
+        '🔹 <b>الخدمات المتاحة:</b>\n' +
+        '• 📱 فحص الأرقام\n' +
+        '• 📢 قناتنا الرسمية\n' +
+        '• 👤 معلومات حسابك\n' +
+        '━━━━━━━━━━━━━━━━━━━\n\n' +
+        '<i>اختر الخدمة التي تريدها من الأزرار أدناه:</i>',
+        Markup.inlineKeyboard(keyboard)
+    );
+}
+
+async function sendCheckInstructions(ctx) {
+    await ctx.replyWithHTML(
+        '📱 <b>أرسل لي الأرقام التي تريد فحصها</b>\n\n' +
+        '━━━━━━━━━━━━━━━━━━━\n' +
+        '📌 <b>طريقة الإرسال:</b>\n' +
+        '• كل رقم في سطر منفصل\n' +
+        '• يمكنك إرسال 1 إلى 100 رقم\n\n' +
+        '📌 <b>مثال:</b>\n' +
+        '<code>+966501234567\n00966501234568\n966501234569</code>\n\n' +
+        '⏳ <b>نظام الانتظار:</b>\n' +
+        '• 1 رقم: 5 ثواني\n' +
+        '• 2-10 أرقام: 5 ثواني\n' +
+        '• 11-100 رقم: 10 ثواني\n' +
+        '━━━━━━━━━━━━━━━━━━━'
+    );
+}
+
+async function sendMyInfo(ctx) {
+    const userId = ctx.from.id;
+    const user = users.get(userId);
+    const role = getAdminRole(userId);
+    
+    if (!user) {
+        return ctx.reply('❌ لم يتم العثور على معلوماتك.');
+    }
+
+    let info = 
+        '👤 <b>معلومات حسابك</b>\n\n' +
+        '━━━━━━━━━━━━━━━━━━━\n' +
+        '🆔 <b>المعرف:</b> <code>' + userId + '</code>\n' +
+        '👤 <b>الاسم:</b> ' + user.firstName + '\n' +
+        '📛 <b>اليوزر:</b> @' + (user.username || 'لا يوجد') + '\n' +
+        '📅 <b>تاريخ الانضمام:</b> ' + user.joinedAt + '\n' +
+        '⏰ <b>آخر نشاط:</b> ' + user.lastActive + '\n' +
+        '━━━━━━━━━━━━━━━━━━━';
+
+    if (role) {
+        info += '\n\n🔰 <b>الرتبة:</b> ' + role;
+    }
+
+    await ctx.replyWithHTML(info);
+}
+
+async function showAdminPanel(ctx) {
+    const userId = ctx.from.id;
+    const isOwnerUser = isOwner(userId);
+    
+    let keyboard = [
+        [Markup.button.callback('📢 إذاعة', 'broadcast_btn')],
+        [Markup.button.callback('📊 إحصائيات', 'stats_btn')],
+        [Markup.button.callback('👥 قائمة المستخدمين', 'users_list_btn')],
+        [Markup.button.callback('👤 عرض المستخدمين بالتفصيل', 'users_details_btn')]
+    ];
+
+    if (isOwnerUser) {
+        keyboard.push([Markup.button.callback('➕ إضافة أدمن', 'add_admin_btn')]);
+        keyboard.push([Markup.button.callback('➖ حذف أدمن', 'remove_admin_btn')]);
+        keyboard.push([Markup.button.callback('📋 قائمة الأدمن', 'admins_list_btn')]);
+    }
+
+    keyboard.push([Markup.button.callback('🔙 رجوع للقائمة الرئيسية', 'back_to_main')]);
+
+    await ctx.replyWithHTML(
+        '⚙️ <b>لوحة التحكم</b>\n\n' +
+        '━━━━━━━━━━━━━━━━━━━\n' +
+        '🔰 <b>الرتبة:</b> ' + getAdminRole(userId) + '\n' +
+        '━━━━━━━━━━━━━━━━━━━\n\n' +
+        '<i>اختر الأمر الذي تريده:</i>',
+        Markup.inlineKeyboard(keyboard)
+    );
+}
+
+async function broadcastMessage(ctx, message) {
+    let sent = 0;
+    let failed = 0;
+    
+    await ctx.replyWithHTML('📤 <b>جاري إرسال الإذاعة...</b>');
+    
+    for (let [userId, user] of users) {
+        try {
+            await bot.telegram.sendMessage(userId, 
+                '📢 <b>إذاعة من الإدارة</b>\n\n' +
+                '━━━━━━━━━━━━━━━━━━━\n' +
+                message + '\n' +
+                '━━━━━━━━━━━━━━━━━━━',
+                { parse_mode: 'HTML' }
+            );
+            sent++;
+        } catch (error) {
+            failed++;
+        }
+    }
+    
+    await ctx.replyWithHTML(
+        '✅ <b>تم إرسال الإذاعة!</b>\n\n' +
+        '━━━━━━━━━━━━━━━━━━━\n' +
+        '📤 <b>تم الإرسال:</b> ' + sent + ' مستخدم\n' +
+        '❌ <b>فشل:</b> ' + failed + ' مستخدم\n' +
+        '━━━━━━━━━━━━━━━━━━━'
+    );
+}
+
+async function sendStats(ctx) {
+    const totalUsers = users.size;
+    const totalAdmins = admins.size + 1;
+    
+    await ctx.replyWithHTML(
+        '📊 <b>إحصائيات البوت</b>\n\n' +
+        '━━━━━━━━━━━━━━━━━━━\n' +
+        '👥 <b>عدد المستخدمين:</b> ' + totalUsers + '\n' +
+        '🛡️ <b>عدد الأدمن:</b> ' + totalAdmins + '\n' +
+        '🤖 <b>الحالة:</b> ✅ شغال\n' +
+        '📱 <b>واتساب:</b> ' + (waClient ? '✅ متصل' : '❌ غير متصل') + '\n' +
+        '━━━━━━━━━━━━━━━━━━━'
+    );
+}
+
+async function sendUsersList(ctx) {
+    let list = '👥 <b>قائمة المستخدمين</b>\n\n━━━━━━━━━━━━━━━━━━━\n';
+    let count = 1;
+    
+    for (let [userId, user] of users) {
+        list += count + '. ' + user.firstName + ' (@' + (user.username || 'لا يوجد') + ')';
+        if (isAdmin(userId)) {
+            list += ' 🔰' + getAdminRole(userId);
+        }
+        list += '\n';
+        count++;
+        if (count > 30) {
+            list += '\n... وعرض ' + (users.size - 30) + ' مستخدم آخر';
+            break;
+        }
+    }
+    
+    list += '\n━━━━━━━━━━━━━━━━━━━';
+    await ctx.replyWithHTML(list);
+}
+
+async function sendUsersDetails(ctx) {
+    let details = '👤 <b>قائمة المستخدمين بالتفصيل</b>\n\n';
+    let count = 1;
+    
+    for (let [userId, user] of users) {
+        details += '━━━━━━━━━━━━━━━━━━━\n';
+        details += '👤 <b>' + count + '. ' + user.firstName + '</b>\n';
+        details += '🆔 <b>المعرف:</b> <code>' + userId + '</code>\n';
+        details += '📛 <b>اليوزر:</b> @' + (user.username || 'لا يوجد') + '\n';
+        details += '📅 <b>تاريخ الانضمام:</b> ' + user.joinedAt + '\n';
+        details += '⏰ <b>آخر نشاط:</b> ' + user.lastActive + '\n';
+        if (isAdmin(userId)) {
+            details += '🔰 <b>الرتبة:</b> ' + getAdminRole(userId) + '\n';
+        }
+        count++;
+        if (count > 10) {
+            details += '\n... وعرض ' + (users.size - 10) + ' مستخدم آخر';
+            break;
+        }
+    }
+    
+    if (users.size === 0) {
+        details += 'لا يوجد مستخدمين حتى الآن.';
+    }
+    
+    await ctx.replyWithHTML(details);
+}
+
+async function sendAdminsList(ctx) {
+    let list = '🛡️ <b>قائمة الأدمن</b>\n\n━━━━━━━━━━━━━━━━━━━\n';
+    let count = 1;
+    
+    try {
+        const owner = await bot.telegram.getChat(OWNER_ID);
+        list += count + '. ' + (owner.first_name || 'المالك') + ' 👑 (المالك الرئيسي)\n';
+        count++;
+    } catch (e) {}
+    
+    for (let [userId, data] of admins) {
+        try {
+            const user = await bot.telegram.getChat(userId);
+            list += count + '. ' + (user.first_name || 'أدمن') + ' 🛡️ (' + data.role + ')\n';
+            count++;
+        } catch (e) {}
+    }
+    
+    if (count === 1) {
+        list += 'لا يوجد أدمن إضافيين.';
+    }
+    
+    list += '\n━━━━━━━━━━━━━━━━━━━';
+    await ctx.replyWithHTML(list);
+}
+
+async function addAdmin(ctx, userId, role = '🛡️ أدمن') {
+    if (admins.has(userId)) {
+        return ctx.reply('❌ هذا المستخدم أدمن بالفعل.');
+    }
+    
+    admins.set(userId, {
+        role: role,
+        addedBy: ctx.from.id,
+        addedAt: new Date().toISOString()
+    });
+    
+    await ctx.replyWithHTML('✅ <b>تم إضافة المستخدم كـ ' + role + '</b>');
+}
+
+async function removeAdmin(ctx, userId) {
+    if (!admins.has(userId)) {
+        return ctx.reply('❌ هذا المستخدم ليس أدمن.');
+    }
+    
+    admins.delete(userId);
+    await ctx.replyWithHTML('✅ <b>تم حذف الأدمن.</b>');
+}
+
+bot.action('check_numbers', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await sendCheckInstructions(ctx);
+});
+
+bot.action('my_info', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await sendMyInfo(ctx);
+});
+
+bot.action('admin_panel', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await showAdminPanel(ctx);
+});
+
+bot.action('back_to_main', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await showMainMenu(ctx);
+});
+
+bot.action('broadcast_btn', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await ctx.replyWithHTML('📢 <b>أرسل رسالة الإذاعة:</b>');
+});
+
+bot.action('stats_btn', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await sendStats(ctx);
+});
+
+bot.action('users_list_btn', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await sendUsersList(ctx);
+});
+
+bot.action('users_details_btn', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await sendUsersDetails(ctx);
+});
+
+bot.action('admins_list_btn', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await sendAdminsList(ctx);
+});
+
+bot.action('add_admin_btn', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await ctx.replyWithHTML(
+        '➕ <b>إضافة أدمن جديد</b>\n\n' +
+        '📌 <b>طريقة الاستخدام:</b>\n' +
+        '• أرسل معرف المستخدم (ID) الذي تريد إضافته.\n' +
+        '• مثال: <code>/addadmin 123456789</code>'
+    );
+});
+
+bot.action('remove_admin_btn', async (ctx) => {
+    try { await ctx.answerCbQuery(); } catch (e) {}
+    await ctx.replyWithHTML(
+        '➖ <b>حذف أدمن</b>\n\n' +
+        '📌 <b>طريقة الاستخدام:</b>\n' +
+        '• أرسل معرف المستخدم (ID) الذي تريد حذفه.\n' +
+        '• مثال: <code>/removeadmin 123456789</code>'
+    );
+});
+
+bot.command(['start', 'Start', 'START'], async (ctx) => {
+    const userId = ctx.from.id;
+
+    const isSubscribed = await checkSubscription(userId);
+    if (!isSubscribed) {
+        return ctx.replyWithHTML(
+            '⚠️ <b>مرحباً بك في بوت فحص أرقام واتساب!</b> 🤖\n\n' +
+            '━━━━━━━━━━━━━━━━━━━\n' +
+            '📢 <b>للوصول إلى الخدمة، يجب عليك الاشتراك في قناتنا أولاً!</b>\n\n' +
+            '📌 <b>رابط القناة:</b>\n' +
+            '<a href="' + CHANNEL_URL + '">' + CHANNEL_URL + '</a>\n\n' +
+            '🔔 <b>بعد الاشتراك، اضغط /start مرة أخرى.</b>\n' +
+            '━━━━━━━━━━━━━━━━━━━'
+        );
+    }
+
+    await showMainMenu(ctx);
+});
+
+bot.command('addadmin', async (ctx) => {
+    if (!isOwner(ctx.from.id)) {
+        return ctx.reply('❌ هذا الأمر للمالك الرئيسي فقط.');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML(
+            '❌ <b>الرجاء إرسال معرف المستخدم.</b>\n' +
+            'مثال: <code>/addadmin 123456789</code>'
+        );
+    }
+    
+    const targetId = parseInt(args[1]);
+    if (isNaN(targetId)) {
+        return ctx.reply('❌ معرف غير صحيح.');
+    }
+    
+    await addAdmin(ctx, targetId);
+});
+
+bot.command('removeadmin', async (ctx) => {
+    if (!isOwner(ctx.from.id)) {
+        return ctx.reply('❌ هذا الأمر للمالك الرئيسي فقط.');
+    }
+    
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.replyWithHTML(
+            '❌ <b>الرجاء إرسال معرف المستخدم.</b>\n' +
+            'مثال: <code>/removeadmin 123456789</code>'
+        );
+    }
+    
+    const targetId = parseInt(args[1]);
+    if (isNaN(targetId)) {
+        return ctx.reply('❌ معرف غير صحيح.');
+    }
+    
+    await removeAdmin(ctx, targetId);
+});
+
+bot.on('message', async (ctx) => {
+    const userId = ctx.from.id;
+    const text = ctx.message.text;
+
+    if (!text || text.startsWith('/')) return;
+
+    if (isAdmin(userId) && text.startsWith('📢')) {
+        const message = text.replace('📢', '').trim();
+        if (message) {
+            await broadcastMessage(ctx, message);
+        }
+        return;
+    }
+
+    const isSubscribed = await checkSubscription(userId);
+    if (!isSubscribed) {
+        return ctx.replyWithHTML(
+            '⚠️ <b>للوصول إلى هذه الخدمة، يجب عليك الاشتراك في قناتنا أولاً!</b>\n\n' +
+            '📌 <b>رابط القناة:</b>\n' +
+            '<a href="' + CHANNEL_URL + '">' + CHANNEL_URL + '</a>\n\n' +
+            '🔔 <b>بعد الاشتراك، أعد إرسال طلبك.</b>'
+        );
+    }
+
+    if (!waClient) {
+        return ctx.reply('⏳ البوت قيد التجهيز، حاول بعد شوي');
+    }
+
+    const now = Date.now();
+    const cooldownData = userCooldowns.get(userId);
+
+    if (cooldownData && now < cooldownData.endTime) {
+        const remaining = Math.ceil((cooldownData.endTime - now) / 1000);
+        return ctx.replyWithHTML(
+            '⏳ <b>أنت في فترة انتظار!</b>\n\n' +
+            '⏱️ تبقت ' + remaining + ' ثانية للفحص مرة أخرى.\n' +
+            '📌 <b>انتظر حتى انتهاء الوقت ثم أرسل أرقاماً جديدة.</b>'
+        );
+    }
+
+    const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+    const numbers = [];
+    const originalNumbers = [];
+
+    for (let line of lines) {
+        let cleanNumber = line.replace(/^\+/, '').replace(/^00/, '');
+        if (/^\d+$/.test(cleanNumber)) {
+            numbers.push(cleanNumber);
+            if (line.startsWith('+')) {
+                originalNumbers.push('+' + cleanNumber);
+            } else {
+                originalNumbers.push('+' + cleanNumber);
+            }
+        }
+    }
+
+    if (numbers.length === 0) {
+        return ctx.replyWithHTML(
+            '📱 <b>أرسل لي أرقام فقط</b>\n\n' +
+            'مثال: <code>966501234567</code> أو <code>+966501234567</code>\n' +
+            'كل رقم في سطر منفصل'
+        );
+    }
+
+    const MAX_CHECK = 100;
+    let totalNumbers = numbers.length;
+    let numbersToCheck = numbers.slice(0, MAX_CHECK);
+    let originalToCheck = originalNumbers.slice(0, MAX_CHECK);
+
+    let waitTime = 0;
+    let waitMessage = '';
+
+    if (totalNumbers === 1) {
+        waitTime = 5000;
+        waitMessage = '✅ <b>تم فحص رقم واحد</b>\n⏳ يمكنك الفحص مرة أخرى بعد 5 ثواني';
+        userCooldowns.set(userId, { endTime: now + waitTime });
+    } else if (totalNumbers >= 2 && totalNumbers <= 10) {
+        waitTime = 5000;
+        waitMessage = '✅ <b>تم فحص ' + totalNumbers + ' أرقام</b>\n⏳ يمكنك الفحص مرة أخرى بعد 5 ثواني';
+        userCooldowns.set(userId, { endTime: now + waitTime });
+    } else if (totalNumbers >= 11 && totalNumbers <= 100) {
+        waitTime = 10000;
+        waitMessage = '✅ <b>تم فحص ' + totalNumbers + ' رقم</b>\n⏳ يمكنك الفحص مرة أخرى بعد 10 ثواني';
+        userCooldowns.set(userId, { endTime: now + waitTime });
+    } else {
+        waitTime = 10000;
+        waitMessage = '✅ <b>تم فحص 100 رقم من أصل ' + totalNumbers + '</b>\n⚠️ تم تجاهل ' + (totalNumbers - MAX_CHECK) + ' رقم لأن الحد الأقصى 100 رقم لكل رسالة\n⏳ يمكنك الفحص مرة أخرى بعد 10 ثواني';
+        userCooldowns.set(userId, { endTime: now + waitTime });
+    }
+
+    await ctx.replyWithHTML(waitMessage);
+
+    let results = [];
+    for (let i = 0; i < numbersToCheck.length; i++) {
+        try {
+            const [result] = await waClient.onWhatsApp(numbersToCheck[i]);
+            const status = result?.exists ? '✅ مسجل' : '❌ غير مسجل';
+            results.push('• ' + originalToCheck[i] + ': ' + status);
+        } catch (error) {
+            results.push('• ' + originalToCheck[i] + ': ⚠️ خطأ في الفحص');
+        }
+    }
+
+    await ctx.replyWithHTML('📊 <b>نتيجة الفحص</b>\n\n' + results.join('\n'));
+});
+
+bot.launch().then(() => console.log('✅ البوت شغال!'));
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
+EOF
